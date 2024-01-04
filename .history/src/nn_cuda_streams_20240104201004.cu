@@ -1,4 +1,4 @@
- /*
+/*
  * nn.cu
  * Nearest Neighbor
  *
@@ -13,14 +13,18 @@
 #define min( a, b )			a > b ? b : a
 #define ceilDiv( a, b )		( a + b - 1 ) / b
 #define print( x )			printf( #x ": %lu\n", (unsigned long) x )
-#define DEBUG				false
+#define DEBUG				true
 
 #define DEFAULT_THREADS_PER_BLOCK 256
+#define STREAMCOUNT 4
 
 #define MAX_ARGS 10
 #define REC_LENGTH 53 // size of a record in db
 #define LATITUDE_POS 28	// character position of the latitude value in each record
 #define OPEN 10000	// initial value of nearest neighbors
+#define epsilon 0.000001
+
+
 typedef struct latLong
 {
   float lat;
@@ -33,12 +37,22 @@ typedef struct record
   float distance;
 } Record;
 
+
+struct timeval t_start, t_end;
+void cputimer_start(){
+  gettimeofday(&t_start, 0);
+}
+void cputimer_stop(const char* info){
+  gettimeofday(&t_end, 0);
+  double time = (1000000.0*(t_end.tv_sec-t_start.tv_sec) + t_end.tv_usec-t_start.tv_usec);
+  printf("Timing - %s. \t\tElasped %.0f microseconds \n", info, time);
+}
+
 int loadData(char *filename,std::vector<Record> &records,std::vector<LatLong> &locations);
-void findLowest(std::vector<Record> &records,float *distances,int numRecords,int topN);
 void printUsage();
 int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,float *lng,
                      int *q, int *t, int *p, int *d);
-void printLowest(std::vector<Record> &records, int *min_record, int topN, float *dis_min);
+
 /**
 * Kernel
 * Executed on GPU
@@ -84,7 +98,7 @@ time complexity is O(numRecords/sqrt(numRecords/numMin))
 find_min and find_min_final uses the same algorithm, Quickselect
 */
 
-__global__ void find_min( float *d_distances, int numRecords, int *d_minLoc, int offset, int numMin, float *tmp)
+__global__ void find_min( float *d_distances, int numRecords, int *d_minLoc, int offset, int numMin, float *tmp, int streamOffset)
 {
     int globalId = blockIdx.x * blockDim.x + threadIdx.x;
     int low = 0, high = (globalId + 1)* offset > numRecords ? numRecords - globalId* offset - 1 : offset - 1;
@@ -112,7 +126,7 @@ __global__ void find_min( float *d_distances, int numRecords, int *d_minLoc, int
         //get the min "numMin" elements
         for(int i = 0; i < max; i++){
             if(d_distances[i+offset_mul] < min_k){
-                d_minLoc[offset_min + k] = i + offset_mul;
+                d_minLoc[offset_min + k] = i + offset_mul + streamOffset;
                 k++;
             }
         }
@@ -120,7 +134,7 @@ __global__ void find_min( float *d_distances, int numRecords, int *d_minLoc, int
         if(k < numMin){
             for(int i = 0; i < max; i++){
                 if((d_distances[i+offset_mul] == min_k) && k < numMin){
-                    d_minLoc[offset_min + k] = i + offset_mul;
+                    d_minLoc[offset_min + k] = i + offset_mul + streamOffset;
                     k++;
                 }
             }
@@ -135,6 +149,8 @@ time complexity is O(sqrt(numRecords/numMin) * numMin)
 */
 __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int numMin, float *min_dis, float *dis_min, int *d_minmem)
 {
+
+
     float min_k = 0;
     int pivotIndex;
     int low = 0, high = num - 1, k = 0;
@@ -163,7 +179,6 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
         if(d_distances[d_minLoc[i]] < min_k)
         {
           d_minmem[k] = d_minLoc[i];
-          printf("d_minmem[%d] :%d\n", i,d_minmem[k]);
           k++;
         }
     }
@@ -172,16 +187,15 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
         for(int i = 0; i < num; i++){
           if((d_distances[d_minLoc[i]] == min_k )&& (k < numMin)){
             d_minmem[k] = d_minLoc[i];
-          printf("d_minmem[%d] :%d\n", i,d_minmem[k]);
             k++;
           }
         }
       }     
     for(int i = 0; i< numMin; i++){
       min_dis[i] = d_distances[d_minmem[i]];
-      printf("min_dis[%d] :%f\n", i,min_dis[i]);
     }
 }
+
 double cpuSecond() {
    cudaDeviceSynchronize();
    struct timeval tp;
@@ -189,12 +203,24 @@ double cpuSecond() {
    return ((double)tp.tv_sec + (double)tp.tv_usec*1.e-6);
 }
 
+
+void printLowest(std::vector<Record> &records, int *min_record, int topN, float *dis_min){
+  for(int i = 0; i < topN; i++)
+    printf("%s --> Distance=%f\n",records[min_record[i]].recString,dis_min[i]);
+}
+
+
+
+
 /**
 * This program finds the k-nearest neighbors
 **/
 
 int main(int argc, char* argv[])
 {
+
+  
+  cputimer_start();
 	float lat, lng;
 	int quiet=0,timing=0,platform=0,device=0;
 
@@ -202,7 +228,7 @@ int main(int argc, char* argv[])
 	std::vector<LatLong> locations;
 	char filename[100];
 	int resultsCount=10;
-  float *dis_min , *tmp;
+  int numStreams = STREAMCOUNT; //Number of Streams
 
     // parse command line
     if (parseCommandline(argc, argv, filename,&resultsCount,&lat,&lng,
@@ -212,30 +238,29 @@ int main(int argc, char* argv[])
     }
 
     int numRecords = loadData(filename,records,locations);
+    int blockSize = numRecords / numStreams; //Number of Records for each Streams
     if (resultsCount > numRecords) resultsCount = numRecords;
-
-    //for(i=0;i<numRecords;i++)
-    //  printf("%s, %f, %f\n",(records[i].recString),locations[i].lat,locations[i].lng);
 
 
     //Pointers to host memory
-	//float *distances;
+  float *dis_min;
+  int *min_record;
 	//Pointers to device memory
 	LatLong *d_locations;
-	float *d_distances, *min_record_dis, *tmp_final_float;
-  int *d_minLoc, *min_record, *d_minmem;
+	float *d_distances, *min_record_dis, *tmp, *tmp_final_float;
+  int *d_minLoc, *d_minmem;
 
 
 	// Scaling calculations - added by Sam Kauffman
 	cudaDeviceProp deviceProp;
 	cudaGetDeviceProperties( &deviceProp, 0 );
-	cudaThreadSynchronize();
+	cudaDeviceSynchronize();
 	unsigned long maxGridX = deviceProp.maxGridSize[0];
 	unsigned long threadsPerBlock = min( deviceProp.maxThreadsPerBlock, DEFAULT_THREADS_PER_BLOCK );
 	size_t totalDeviceMemory;
 	size_t freeDeviceMemory;
 	cudaMemGetInfo(  &freeDeviceMemory, &totalDeviceMemory );
-	cudaThreadSynchronize();
+	cudaDeviceSynchronize();
 	unsigned long usableDeviceMemory = freeDeviceMemory * 85 / 100; // 85% arbitrary throttle to compensate for known CUDA bug
 	unsigned long maxThreads = usableDeviceMemory / 12; // 4 bytes in 3 vectors per thread
 	if ( numRecords > maxThreads )
@@ -249,6 +274,8 @@ int main(int argc, char* argv[])
 	// There will be no more than (gridY - 1) extra blocks
 	dim3 gridDim( gridX, gridY );
   dim3 grid_min(((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock);
+  printf("grid_min : %d\n", grid_min.x);
+
 	if ( DEBUG )
 	{
 		print( totalDeviceMemory ); // 804454400
@@ -261,58 +288,105 @@ int main(int argc, char* argv[])
 		print( blocks ); // 130933
 		print( gridY );
 		print( gridX );
+		print( numRecords );
+		print( numStreams );
+		print( blockSize );
 	}
+
+
+  // Use Cuda Stream
+
+  cudaStream_t streams[numStreams];
+  for (int i = 0; i < numStreams; ++i) {
+      cudaStreamCreate(&streams[i]);
+  }
+
 
 	/**
 	* Allocate memory on host and device
 	*/
-	//distances = (float *)malloc(sizeof(float) * numRecords);
-  min_record = (int *)malloc(sizeof(int) * resultsCount);
-  dis_min = (float *)malloc(sizeof(float) * resultsCount);
-	cudaMalloc((void **) &d_locations,sizeof(LatLong) * numRecords);
-	cudaMalloc((void **) &d_distances,sizeof(float) * numRecords);
-  cudaMalloc((void **) &d_minLoc,sizeof(int) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount);
-  cudaMalloc((void **) &min_record_dis,sizeof(float) * resultsCount);
-  cudaMalloc((void **) &tmp,sizeof(float) * numRecords);
-  cudaMalloc((void **) &tmp_final_float,sizeof(float) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount);
-  cudaMalloc((void **) &d_minmem,sizeof(int) * resultsCount);
-   /**
-    * Transfer data from host to device
-    */
-    cudaMemcpy( d_locations, &locations[0], sizeof(LatLong) * numRecords, cudaMemcpyHostToDevice);
-    /**
-    * Execute kernel
-    */
-    euclid<<< gridDim, threadsPerBlock >>>(d_locations,d_distances,numRecords,lat,lng);
-    cudaThreadSynchronize();
-    int offset =(float)numRecords / (int)(sqrt((float)numRecords/(float)resultsCount)+1) + 1;
-    find_min<<< grid_min , threadsPerBlock >>>(d_distances, numRecords, d_minLoc, offset, resultsCount,tmp);
-    cudaThreadSynchronize();
-    find_min_final<<< 1, 1 >>>(d_distances, (int)(sqrt((float)numRecords/(float)resultsCount)+1) * resultsCount, d_minLoc, resultsCount, min_record_dis, tmp_final_float, d_minmem);
-    cudaThreadSynchronize();
-    //Copy data from device memory to host memory
-    //cudaMemcpy( distances, d_distances, sizeof(float)*numRecords, cudaMemcpyDeviceToHost );
-    cudaMemcpy( min_record, d_minmem, sizeof(int)*resultsCount, cudaMemcpyDeviceToHost );
-    cudaMemcpy( dis_min, min_record_dis, sizeof(float)*resultsCount, cudaMemcpyDeviceToHost );
-	// find the resultsCount least distances
-    //findLowest(records,distances,numRecords,resultsCount);
-    printLowest(records, min_record, resultsCount, dis_min);
+  
+    
+    min_record = (int *)malloc(sizeof(int) * resultsCount * numStreams);
+    dis_min = (float *)malloc(sizeof(float) * resultsCount * numStreams);
+
+    // cudaHostAlloc((void **) &d_locations,sizeof(LatLong) * numRecords, cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &d_distances,sizeof(float) * numRecords, cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &d_minLoc,sizeof(int) * (int)(sqrt((float)numRecords/(float)resultsCount)+1), cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &min_record_dis,sizeof(float) * resultsCount, cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &tmp,sizeof(float) * numRecords, cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &tmp_final_float,sizeof(float) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount, cudaHostAllocDefault);
+    // cudaHostAlloc((void **) &d_minmem,sizeof(int) * resultsCount, cudaHostAllocDefault);
+
+    cudaMalloc((void **) &d_locations,sizeof(LatLong) * numRecords);
+    cudaMalloc((void **) &d_distances,sizeof(float) * numRecords);
+    cudaMalloc((void **) &d_minLoc,sizeof(int) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount * numStreams);
+    cudaMalloc((void **) &min_record_dis,sizeof(float) * resultsCount);
+    cudaMalloc((void **) &tmp,sizeof(float) * numRecords * numStreams);
+    cudaMalloc((void **) &tmp_final_float,sizeof(float) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount * numStreams);
+    cudaMalloc((void **) &d_minmem,sizeof(float) * (int)(sqrt((float)numRecords/(float)resultsCount)+1)* resultsCount * numStreams);
+    
+  
+
+
+    for (int i = 0; i < numStreams; ++i) {
+
+
+      int numRecordsForThisBlock = blockSize;
+      if (i == numStreams - 1) {
+        numRecordsForThisBlock = numRecords - i * blockSize; 
+      }
+
+      cudaMemcpyAsync(d_locations + i * blockSize, &locations[i * blockSize], 
+                      sizeof(LatLong) * numRecordsForThisBlock, cudaMemcpyHostToDevice, streams[i]);
+
+
+      euclid<<<gridDim, threadsPerBlock, 0, streams[i]>>>(d_locations + i * blockSize, 
+                                                          d_distances + i * blockSize, 
+                                                          numRecordsForThisBlock, lat, lng);
+
+      
+      cudaStreamSynchronize(streams[i]);
+
+      
+      int offset =(float)numRecordsForThisBlock / (int)(sqrt((float)numRecordsForThisBlock/(float)resultsCount)+1) + 1;
+      find_min<<< grid_min , threadsPerBlock, 0, streams[i] >>>(d_distances + i * blockSize, numRecordsForThisBlock, d_minLoc + i * (int)(sqrt((float)blockSize/(float)resultsCount)+1) * resultsCount , offset, resultsCount, tmp + i * blockSize, i * blockSize);
+
+    }
+
+        // Wait for synchronization and destroy streams
+    for (int i = 0; i < numStreams; i++) {
+      cudaStreamSynchronize(streams[i]);
+      cudaStreamDestroy(streams[i]);
+    }
+
+  
+    find_min_final<<< 1, 1 >>>(d_distances, (int)(sqrt((float)blockSize/(float)resultsCount)+1) * resultsCount * numStreams , d_minLoc, resultsCount, min_record_dis, tmp_final_float, d_minmem);
+    cudaDeviceSynchronize();
+
+
+    cudaMemcpy( min_record, d_minLoc, sizeof(int)*resultsCount * numStreams, cudaMemcpyDeviceToHost);
+    cudaMemcpy( dis_min, min_record_dis, sizeof(float)*resultsCount, cudaMemcpyDeviceToHost);
+
+    //Free Device memory
+    cudaFree(d_locations);
+    cudaFree(d_distances);
+    cudaFree(d_minLoc);
+    cudaFree(min_record_dis);
+    cudaFree(tmp);
+    cudaFree(tmp_final_float);
+    cudaFree(d_minmem);
+
+
     // print out results
-    /*if (!quiet)
-    for(i=0;i<resultsCount;i++) {
-      printf("%s --> Distance=%f\n",records[i].recString,records[i].distance);
-    }*/
+    if (!quiet)
+    printLowest(records, min_record, resultsCount, dis_min);
+    cputimer_stop("Execuation Time");
+
+    //Free Host memory
     free(min_record);
     free(dis_min);
-    //Free memory
-	cudaFree(d_locations);
-	cudaFree(d_distances);
-  cudaFree(d_minLoc);
-  cudaFree(min_record_dis);
-  cudaFree(tmp);
-  cudaFree(tmp_final_float);
-  cudaFree(d_minmem);
-    return 0;
+  return 0;
 
 }
 
@@ -370,36 +444,6 @@ int loadData(char *filename,std::vector<Record> &records,std::vector<LatLong> &l
     return recNum;
 }
 
-void findLowest(std::vector<Record> &records,float *distances,int numRecords,int topN){
-  int i,j;
-  float val;
-  int minLoc;
-  Record *tempRec;
-  float tempDist;
-
-  for(i=0;i<topN;i++) {
-    minLoc = i;
-    for(j=i;j<numRecords;j++) {
-      val = distances[j];
-      if (val < distances[minLoc]) minLoc = j;
-    }
-    // swap locations and distances
-    tempRec = &records[i];
-    records[i] = records[minLoc];
-    records[minLoc] = *tempRec;
-
-    tempDist = distances[i];
-    distances[i] = distances[minLoc];
-    distances[minLoc] = tempDist;
-
-    // add distance to the min we just found
-    records[i].distance = distances[i];
-  }
-}
-void printLowest(std::vector<Record> &records, int *min_record, int topN, float *dis_min){
-  for(int i = 0; i < topN; i++)
-    printf("%s --> Distance=%f\n",records[min_record[i]].recString,dis_min[i]);
-}
 int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,float *lng,
                      int *q, int *t, int *p, int *d){
     int i;
@@ -410,7 +454,7 @@ int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,fl
     for(i=1;i<argc;i++) {
       if (argv[i][0]=='-') {// flag
         flag = argv[i][1];
-          switch (flag) { 
+          switch (flag) {
             case 'r': // number of results
               i++;
               *r = atoi(argv[i]);

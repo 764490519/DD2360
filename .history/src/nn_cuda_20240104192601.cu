@@ -163,7 +163,6 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
         if(d_distances[d_minLoc[i]] < min_k)
         {
           d_minmem[k] = d_minLoc[i];
-          printf("d_minmem[%d] :%d\n", i,d_minmem[k]);
           k++;
         }
     }
@@ -172,14 +171,12 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
         for(int i = 0; i < num; i++){
           if((d_distances[d_minLoc[i]] == min_k )&& (k < numMin)){
             d_minmem[k] = d_minLoc[i];
-          printf("d_minmem[%d] :%d\n", i,d_minmem[k]);
             k++;
           }
         }
       }     
     for(int i = 0; i< numMin; i++){
       min_dis[i] = d_distances[d_minmem[i]];
-      printf("min_dis[%d] :%f\n", i,min_dis[i]);
     }
 }
 double cpuSecond() {
