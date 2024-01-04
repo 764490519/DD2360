@@ -1,0 +1,8 @@
+../../data/nn/cane80k_8_0.db
+../../data/nn/cane80k_8_1.db
+../../data/nn/cane80k_8_2.db
+../../data/nn/cane80k_8_3.db
+../../data/nn/cane80k_8_4.db
+../../data/nn/cane80k_8_5.db
+../../data/nn/cane80k_8_6.db
+../../data/nn/cane80k_8_7.db
