@@ -105,14 +105,17 @@ __device__ int partition_result(float* arr, int* index, int low, int high) {
     int i = low;
     for (int j = low; j < high; j++) {
         if (arr[j] < pivot) {
+          // printf("before swap, %f, %f\n",arr[i], arr[j]);
             swap(&arr[i], &arr[j]);
+          // printf("after swap, %f, %f\n",arr[i], arr[j]);
+          printf("index before swap, %f, %f\n",arr[i], arr[j]);
             swap_int(&index[i], &index[j]);
+          printf("index after swap, %f, %f\n",arr[i], arr[j]);
 
             i++;
         }
     }
     swap(&arr[i], &arr[high]);
-    swap_int(&index[i], &index[high]);
     return i;
 }
 
@@ -235,8 +238,17 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
     }
 
 
+    // for(int i = 0; i< numMin; i++){
+    //   printf("min_dis[%d] = %f\n", i, min_dis[i]);
+    //   printf("d_minmem[%d] = %d\n", i, d_minmem[i]);
+    // }
     quickSort(min_dis, d_minmem, 0, numMin-1);
 
+    
+    // for(int i = 0; i< numMin; i++){
+    //   printf("min_dis[%d] = %f\n", i, min_dis[i]);
+    //   printf("d_minmem[%d] = %d\n", i, d_minmem[i]);
+    // }
 }
 
 double cpuSecond() {

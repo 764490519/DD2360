@@ -76,13 +76,6 @@ __device__ void swap(float* a, float* b) {
     *b = t;
 }
 
-
-__device__ void swap_int(int* a, int* b) {
-    int t = *a;
-    *a = *b;
-    *b = t;
-}
-
 /*
 partition the array, and return the pivot index
 */
@@ -98,37 +91,6 @@ __device__ int partition(float* arr, int low, int high) {
     swap(&arr[i], &arr[high]);
     return i;
 }
-
-
-__device__ int partition_result(float* arr, int* index, int low, int high) {
-    float pivot = arr[high];
-    int i = low;
-    for (int j = low; j < high; j++) {
-        if (arr[j] < pivot) {
-            swap(&arr[i], &arr[j]);
-            swap_int(&index[i], &index[j]);
-
-            i++;
-        }
-    }
-    swap(&arr[i], &arr[high]);
-    swap_int(&index[i], &index[high]);
-    return i;
-}
-
-
-/*
-partition the array, and return the pivot index
-*/
-__device__ void quickSort(float* arr, int* index, int low, int high) {
-    if(low < high){
-      int pivotIndex = partition_result(arr, index, low, high);
-      quickSort(arr, index, low, pivotIndex - 1);
-      quickSort(arr, index, pivotIndex + 1, high);
-    }
-}
-
-
 /*
 find the min "numMin" elements in the array from "offset_mul" to "offset_mul + offset"
 the result is stored in "d_minLoc" from "offset_min" to "offset_min + numMin"
@@ -229,14 +191,9 @@ __global__ void find_min_final(float *d_distances, int num, int *d_minLoc, int n
           }
         }
       }     
-
     for(int i = 0; i< numMin; i++){
       min_dis[i] = d_distances[d_minmem[i]];
     }
-
-
-    quickSort(min_dis, d_minmem, 0, numMin-1);
-
 }
 
 double cpuSecond() {
