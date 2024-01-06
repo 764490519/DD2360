@@ -273,6 +273,7 @@ int main(int argc, char* argv[])
 	int resultsCount=10;
   int numStreams = STREAMCOUNT; //Number of Streams
   int gridMin = 1;
+    printf("gridMin:%d\n", gridMin);
 
     // parse command line
     if (parseCommandline(argc, argv, filename,&resultsCount,&lat,&lng,
@@ -317,7 +318,9 @@ int main(int argc, char* argv[])
 	unsigned long gridX = ceilDiv( blocks, gridY );
 	// There will be no more than (gridY - 1) extra blocks
 	dim3 gridDim( gridX, gridY );
-  dim3 grid_min((((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock) * gridMin);
+  // dim3 grid_min((((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock) * gridMin);
+  dim3 grid_min((((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock));
+  printf("grid_min : %d\n", grid_min.x);
 
 	if ( DEBUG )
 	{

@@ -51,7 +51,7 @@ void cputimer_stop(const char* info){
 int loadData(char *filename,std::vector<Record> &records,std::vector<LatLong> &locations);
 void printUsage();
 int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,float *lng,
-                     int *q, int *t, int *p, int *d, int *g);
+                     int *q, int *t, int *p, int *d);
 
 /**
 * Kernel
@@ -272,11 +272,10 @@ int main(int argc, char* argv[])
 	char filename[100];
 	int resultsCount=10;
   int numStreams = STREAMCOUNT; //Number of Streams
-  int gridMin = 1;
 
     // parse command line
     if (parseCommandline(argc, argv, filename,&resultsCount,&lat,&lng,
-                     &quiet, &timing, &platform, &device, &gridMin)) {
+                     &quiet, &timing, &platform, &device)) {
       printUsage();
       return 0;
     }
@@ -317,7 +316,8 @@ int main(int argc, char* argv[])
 	unsigned long gridX = ceilDiv( blocks, gridY );
 	// There will be no more than (gridY - 1) extra blocks
 	dim3 gridDim( gridX, gridY );
-  dim3 grid_min((((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock) * gridMin);
+  dim3 grid_min((((int)(sqrt((float)numRecords/(float)resultsCount)+1) + threadsPerBlock - 1)/threadsPerBlock) * 10);
+  printf("grid_min : %d\n", grid_min.x);
 
 	if ( DEBUG )
 	{
@@ -481,7 +481,7 @@ int loadData(char *filename,std::vector<Record> &records,std::vector<LatLong> &l
 }
 
 int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,float *lng,
-                     int *q, int *t, int *p, int *d, int*g){
+                     int *q, int *t, int *p, int *d){
     int i;
     if (argc < 2) return 1; // error
     strncpy(filename,argv[1],100);
@@ -519,10 +519,6 @@ int parseCommandline(int argc, char *argv[], char* filename,int *r,float *lat,fl
             case 'd': // device
               i++;
               *d = atoi(argv[i]);
-              break;
-            case 'g': // number of grid
-              i++;
-              *g = atoi(argv[i]);
               break;
         }
       }
